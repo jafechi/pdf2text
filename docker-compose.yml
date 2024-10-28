@@ -9,12 +9,13 @@ services:
     depends_on:
       - redis
     environment:
+      - PYTHONUNBUFFERED=1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
 
   worker:
     build: ./backend
-    command: celery -A app.tasks worker --loglevel=info
+    command: celery -A app.tasks worker --loglevel=info # --max-tasks-per-child=10
     deploy:
         replicas: 2 # Just 2 for this presentation
     volumes:
@@ -23,6 +24,7 @@ services:
     depends_on:
       - redis
     environment:
+      - PYTHONUNBUFFERED=1
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
 
