@@ -33,7 +33,8 @@ if not os.path.exists(UPLOAD_DIRECTORY):
 active_connections: Dict[str, WebSocket] = {}
 
 # Dictionary to map from task_id to client IDs
-task_to_clients: Dict[str, List[str]] = {}  # TODO: Modify this because only one client is interested in the task
+# task_to_clients: Dict[str, List[str]] = {}  # TODO: Modify this because only one client is interested in the task
+task_to_clients: Dict[str, str] = {}  # task_id -> client_id
 
 
 @app.post("/upload")
@@ -69,8 +70,10 @@ def get_result(task_id: str):
     else:
         return {"status": "Processing"}
 
+
 async def send_task_completed_message(websocket: WebSocket, task_id: str):
     await websocket.send_json({"task_id": task_id, "status": "completed"})
+
 
 async def redis_listener():
     # Create Redis connection using redis.asyncio
@@ -89,17 +92,30 @@ async def redis_listener():
                     print("From redis_listener ==> Task ID: ")
                     print(task_id)
 
-                    if task_id in task_to_clients:
-                        clients = task_to_clients[task_id]
-                        for client_id in clients:
-                            websocket = active_connections.get(client_id)
-                            if websocket and websocket.client_state == WebSocketState.CONNECTED:
-                                await websocket.send_json({
-                                    "task_id": task_id,
-                                    "status": data['status']
-                                })
+                    # if task_id in task_to_clients:
+                    #     clients = task_to_clients[task_id]
+                    #     for client_id in clients:
+                    #         websocket = active_connections.get(client_id)
+                    #         if websocket and websocket.client_state == WebSocketState.CONNECTED:
+                    #             await websocket.send_json({
+                    #                 "task_id": task_id,
+                    #                 "status": data['status']
+                    #             })
+                    #     # Clean up after notification
+                    #     del task_to_clients[task_id]
+
+                    # Get the single client_id associated with this task
+                    client_id = task_to_clients.get(task_id)
+                    if client_id:
+                        websocket = active_connections.get(client_id)
+                        if websocket and websocket.client_state == WebSocketState.CONNECTED:
+                            await websocket.send_json({
+                                "task_id": task_id,
+                                "status": data['status']
+                            })
                         # Clean up after notification
                         del task_to_clients[task_id]
+
             except Exception as e:
                 print(f"Error in redis listener: {e}")
                 await asyncio.sleep(1)
@@ -108,12 +124,15 @@ async def redis_listener():
         await pubsub.unsubscribe('task_complete')
         await redis.close()
 
+
 app.redis_listener_task = None  # Initialize the task holder
+
 
 @app.on_event("startup")
 async def startup_event():
     # Create and store the background task
     app.redis_listener_task = asyncio.create_task(redis_listener())
+
 
 # Optionally, clean up on shutdown
 @app.on_event("shutdown")
@@ -135,14 +154,16 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             data = await websocket.receive_json()
             task_id = data.get("task_id")
             if task_id:
-                if task_id in task_to_clients:
-                    task_to_clients[task_id].append(client_id)
-                else:
-                    task_to_clients[task_id] = [client_id]
+                # Simply map the task to this client, overwriting any previous mapping
+                task_to_clients[task_id] = client_id
     except WebSocketDisconnect:
         del active_connections[client_id]
-        for clients in task_to_clients.values():
-            if client_id in clients:
-                clients.remove(client_id)
+        # Remove any tasks associated with this client
+        task_ids_to_remove = [
+            task_id for task_id, cid in task_to_clients.items()
+            if cid == client_id
+        ]
+        for task_id in task_ids_to_remove:
+            del task_to_clients[task_id]
     except Exception as e:
         await websocket.close()
