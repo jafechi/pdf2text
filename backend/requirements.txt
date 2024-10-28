@@ -6,3 +6,5 @@ aiofiles
 python-multipart
 pytesseract
 pillow
+pdf2image
+PyPDF2

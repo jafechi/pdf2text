@@ -161,4 +161,3 @@ cython_debug/
 #.idea/
 
 data/
-backend/main_2.py

@@ -4,8 +4,8 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from celery.result import AsyncResult
-from tasks import extract_text_from_pdf
-from celery_app import celery_app
+from .celery_app import celery_app
+from .tasks import process_pdf_task
 
 app = FastAPI()
 
@@ -34,10 +34,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         content = await file.read()  # async read
         await out_file.write(content)  # async write
 
-    print("Hello")
-
-    # Start Celery task
-    task = extract_text_from_pdf.delay(pdf_path, txt_path)
+    task = process_pdf_task.delay(pdf_path, txt_path)
 
     return {"task_id": task.id}
 
@@ -45,8 +42,16 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.get("/result/{task_id}")
 def get_result(task_id: str):
     result = AsyncResult(task_id, app=celery_app)
+
+    # TODO: Detect when the task_id is invalid
+
     if result.ready():
         txt_path = result.get()
+
+        if not txt_path:
+            # TOOD: Analyze what to do here. Retry? Just return an error?
+            return {"status": "Error"}
+
         return FileResponse(txt_path, media_type='text/plain', filename=os.path.basename(txt_path))
     else:
         return {"status": "Processing"}
