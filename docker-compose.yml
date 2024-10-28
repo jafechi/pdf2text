@@ -1,0 +1,30 @@
+services:
+  web:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+
+  worker:
+    build: ./backend
+    command: celery -A tasks worker --loglevel=info
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    depends_on:
+      - redis
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "6379:6379"

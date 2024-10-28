@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+celery
+redis
+aiofiles
+python-multipart
+pytesseract
+pillow
