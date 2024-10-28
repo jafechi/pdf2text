@@ -1,10 +1,10 @@
 import asyncio
 import json
 import os
-from typing import Dict, List
+from contextlib import asynccontextmanager
+from typing import Dict
 
 import aiofiles
-# import aioredis
 from redis.asyncio import Redis
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -12,10 +12,80 @@ from fastapi.middleware.cors import CORSMiddleware
 from celery.result import AsyncResult
 from .celery_app import celery_app
 from .tasks import process_pdf_task
-from celery.signals import task_success, task_failure, task_prerun
 from starlette.websockets import WebSocketState
 
-app = FastAPI()
+
+async def setup_redis():
+    """Setup Redis connection and pubsub"""
+    redis = Redis.from_url(os.getenv('CELERY_RESULT_BACKEND'))
+    pubsub = redis.pubsub()
+
+    await pubsub.subscribe('task_complete')
+    return redis, pubsub
+
+
+async def cleanup_redis(app: FastAPI, redis: Redis, pubsub):
+    """Cleanup Redis resources"""
+    if hasattr(app, 'redis_listener_task'):
+        app.redis_listener_task.cancel()
+        try:
+            await app.redis_listener_task
+        except asyncio.CancelledError:
+            pass
+
+    await pubsub.unsubscribe('task_complete')
+    await redis.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: setup Redis
+    redis, pubsub = await setup_redis()
+    app.redis_listener_task = asyncio.create_task(redis_listener(pubsub))
+
+    try:
+        yield
+    finally:
+        # Shutdown: cleanup Redis
+        await cleanup_redis(app, redis, pubsub)
+
+
+async def handle_redis_message(message: dict):
+    """Handle incoming Redis message and notify relevant client"""
+    data = json.loads(message['data'])
+    task_id = data['task_id']
+
+    print("From handle_redis_message ==> Task ID: ")
+    print(task_id)
+
+    client_id = task_to_clients.get(task_id)
+    if client_id:
+        websocket = active_connections.get(client_id)
+        if websocket and websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.send_json({
+                "task_id": task_id,
+                "status": data['status']
+            })
+        del task_to_clients[task_id]
+
+
+async def redis_listener(pubsub):
+    """Listen for Redis messages"""
+    try:
+        while True:
+            try:
+                message = await pubsub.get_message(ignore_subscribe_messages=True)
+                if message and message['type'] == 'message':
+                    await handle_redis_message(message)
+            except Exception as e:
+                print(f"Error in redis listener: {e}")
+                await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        # Handle cancellation gracefully
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,74 +145,73 @@ async def send_task_completed_message(websocket: WebSocket, task_id: str):
     await websocket.send_json({"task_id": task_id, "status": "completed"})
 
 
-async def redis_listener():
-    # Create Redis connection using redis.asyncio
-    redis = Redis.from_url(os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0'))
-    pubsub = redis.pubsub()
-    await pubsub.subscribe('task_complete')
-
-    try:
-        while True:
-            try:
-                message = await pubsub.get_message(ignore_subscribe_messages=True)
-                if message and message['type'] == 'message':
-                    data = json.loads(message['data'])
-                    task_id = data['task_id']
-
-                    print("From redis_listener ==> Task ID: ")
-                    print(task_id)
-
-                    # if task_id in task_to_clients:
-                    #     clients = task_to_clients[task_id]
-                    #     for client_id in clients:
-                    #         websocket = active_connections.get(client_id)
-                    #         if websocket and websocket.client_state == WebSocketState.CONNECTED:
-                    #             await websocket.send_json({
-                    #                 "task_id": task_id,
-                    #                 "status": data['status']
-                    #             })
-                    #     # Clean up after notification
-                    #     del task_to_clients[task_id]
-
-                    # Get the single client_id associated with this task
-                    client_id = task_to_clients.get(task_id)
-                    if client_id:
-                        websocket = active_connections.get(client_id)
-                        if websocket and websocket.client_state == WebSocketState.CONNECTED:
-                            await websocket.send_json({
-                                "task_id": task_id,
-                                "status": data['status']
-                            })
-                        # Clean up after notification
-                        del task_to_clients[task_id]
-
-            except Exception as e:
-                print(f"Error in redis listener: {e}")
-                await asyncio.sleep(1)
-    finally:
-        # Clean up Redis connection when the listener stops
-        await pubsub.unsubscribe('task_complete')
-        await redis.close()
-
-
-app.redis_listener_task = None  # Initialize the task holder
+# async def redis_listener():
+#     # Create Redis connection using redis.asyncio
+#     redis = Redis.from_url(os.getenv('CELERY_RESULT_BACKEND'))
+#     pubsub = redis.pubsub()
+#     await pubsub.subscribe('task_complete')
+#
+#     try:
+#         while True:
+#             try:
+#                 message = await pubsub.get_message(ignore_subscribe_messages=True)
+#                 if message and message['type'] == 'message':
+#                     data = json.loads(message['data'])
+#                     task_id = data['task_id']
+#
+#                     print("From redis_listener ==> Task ID: ")
+#                     print(task_id)
+#
+#                     # if task_id in task_to_clients:
+#                     #     clients = task_to_clients[task_id]
+#                     #     for client_id in clients:
+#                     #         websocket = active_connections.get(client_id)
+#                     #         if websocket and websocket.client_state == WebSocketState.CONNECTED:
+#                     #             await websocket.send_json({
+#                     #                 "task_id": task_id,
+#                     #                 "status": data['status']
+#                     #             })
+#                     #     # Clean up after notification
+#                     #     del task_to_clients[task_id]
+#
+#                     # Get the single client_id associated with this task
+#                     client_id = task_to_clients.get(task_id)
+#                     if client_id:
+#                         websocket = active_connections.get(client_id)
+#                         if websocket and websocket.client_state == WebSocketState.CONNECTED:
+#                             await websocket.send_json({
+#                                 "task_id": task_id,
+#                                 "status": data['status']
+#                             })
+#                         # Clean up after notification
+#                         del task_to_clients[task_id]
+#
+#             except Exception as e:
+#                 print(f"Error in redis listener: {e}")
+#                 await asyncio.sleep(1)
+#     finally:
+#         # Clean up Redis connection when the listener stops
+#         await pubsub.unsubscribe('task_complete')
+#         await redis.close()
 
 
-@app.on_event("startup")
-async def startup_event():
-    # Create and store the background task
-    app.redis_listener_task = asyncio.create_task(redis_listener())
-
-
-# Optionally, clean up on shutdown
-@app.on_event("shutdown")
-async def shutdown_event():
-    if app.redis_listener_task:
-        app.redis_listener_task.cancel()
-        try:
-            await app.redis_listener_task
-        except asyncio.CancelledError:
-            pass
+# app.redis_listener_task = None  # Initialize the task holder
+#
+# @app.on_event("startup")
+# async def startup_event():
+#     # Create and store the background task
+#     app.redis_listener_task = asyncio.create_task(redis_listener())
+#
+#
+# # Optionally, clean up on shutdown
+# @app.on_event("shutdown")
+# async def shutdown_event():
+#     if app.redis_listener_task:
+#         app.redis_listener_task.cancel()
+#         try:
+#             await app.redis_listener_task
+#         except asyncio.CancelledError:
+#             pass
 
 
 @app.websocket("/ws/{client_id}")
