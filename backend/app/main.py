@@ -33,7 +33,7 @@ async def cleanup_redis(app: FastAPI, redis: Redis, pubsub):
         except asyncio.CancelledError:
             pass
 
-    await pubsub.unsubscribe('task_complete')
+    await pubsub.close()
     await redis.close()
 
 
@@ -52,6 +52,9 @@ async def lifespan(app: FastAPI):
 
 async def handle_redis_message(message: dict):
     """Handle an incoming Redis message and notify the relevant client"""
+    if not message:
+        return
+
     data = json.loads(message['data'])
     task_id = data['task_id']
 
@@ -70,19 +73,23 @@ async def handle_redis_message(message: dict):
 
 
 async def redis_listener(pubsub):
-    """Listen for Redis messages"""
+    """Listen for Redis messages using get_message"""
     try:
         while True:
             try:
-                message = await pubsub.get_message(ignore_subscribe_messages=True)
-                if message and message['type'] == 'message':
+                message = await pubsub.get_message(timeout=1.0)  # 1 second timeout
+                if message:
                     await handle_redis_message(message)
+                await asyncio.sleep(0.01)  # Small sleep to be nice to the system
             except Exception as e:
-                print(f"Error in redis listener: {e}")
-                await asyncio.sleep(1)
+                print(f"Error processing message: {e}")
+                continue
     except asyncio.CancelledError:
-        # Handle cancellation gracefully
-        pass
+        print("Redis listener shutting down")
+        raise
+    except Exception as e:
+        print(f"Fatal error in redis listener: {e}")
+        raise
 
 
 app = FastAPI(lifespan=lifespan)
