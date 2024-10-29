@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PDF Text Extractor</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 50px;
+        }
+        .task-status.processing {
+            color: orange;
+        }
+        .task-status.completed {
+            color: green;
+        }
+        .task-status.error {
+            color: red;
+        }
+        .table-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        #usernameDisplay {
+            font-weight: bold;
+            color: #0d6efd;
+        }
+        /* Center align table content */
+        .table td {
+            vertical-align: middle;
+        }
+        /* Add some spacing in the download column */
+        .spinner-border {
+            margin-right: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">PDF Text Extractor</h1>
+
+        <!-- Username Section -->
+        <div class="row justify-content-center mb-4">
+            <div class="col-md-6">
+                <div id="usernameSection">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">Connect with Username</h5>
+                            <div class="mb-3">
+                                <label for="username" class="form-label">Username:</label>
+                                <input type="text" id="username" class="form-control" placeholder="Enter your username" required>
+                            </div>
+                            <button id="connectButton" class="btn btn-primary w-100">Connect</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Upload Section -->
+        <div id="fileSection">
+            <div class="row justify-content-center mb-4">
+                <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5>Connected as: <span id="usernameDisplay"></span></h5>
+                        <button id="changeUsername" class="btn btn-outline-primary btn-sm">Change Username</button>
+                    </div>
+                    <form id="uploadForm">
+                        <div class="mb-3">
+                            <label for="fileInput" class="form-label">Select PDF files:</label>
+                            <input type="file" id="fileInput" class="form-control" accept=".pdf" multiple required>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100">Upload and Extract Text</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="mt-4">
+                <h3>Your Tasks</h3>
+                <div class="table-container">
+                    <table class="table table-striped" id="taskTable">
+                        <thead>
+                            <tr>
+                                <th>Task ID</th>
+                                <th>Filename</th>
+                                <th>Status</th>
+                                <th>Download</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Tasks will be appended here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS Bundle (includes Popper) -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Your JavaScript file -->
+    <script src="app.js"></script>
+</body>
+</html>

@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
 
 
 async def handle_redis_message(message: dict):
-    """Handle incoming Redis message and notify relevant client"""
+    """Handle an incoming Redis message and notify the relevant client"""
     data = json.loads(message['data'])
     task_id = data['task_id']
 
@@ -102,9 +102,8 @@ if not os.path.exists(UPLOAD_DIRECTORY):
 
 active_connections: Dict[str, WebSocket] = {}
 
-# Dictionary to map from task_id to client IDs
-# task_to_clients: Dict[str, List[str]] = {}  # TODO: Modify this because only one client is interested in the task
-task_to_clients: Dict[str, str] = {}  # task_id -> client_id
+# Dictionary to map from task_id to client ids
+task_to_clients: Dict[str, str] = {}
 
 
 @app.post("/upload")
@@ -133,7 +132,7 @@ def get_result(task_id: str):
         txt_path = result.get()
 
         if not txt_path:
-            # TOOD: Analyze what to do here. Retry? Just return an error?
+            # TODO: Analyze what to do here. Retry? Just return an error?
             return {"status": "Error"}
 
         return FileResponse(txt_path, media_type='text/plain', filename=os.path.basename(txt_path))
