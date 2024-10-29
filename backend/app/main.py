@@ -3,16 +3,22 @@ import json
 import os
 from contextlib import asynccontextmanager
 from typing import Dict
+from uuid import uuid4
 
 import aiofiles
+import boto3
+from pydantic import BaseModel
 from redis.asyncio import Redis
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from celery.result import AsyncResult
 from .celery_app import celery_app
 from .tasks import process_pdf_task
 from starlette.websockets import WebSocketState
+from .config import s3_client, BUCKET_NAME, AWS_REGION, S3_RAW_FOLDER, S3_PROCESSED_FOLDER
+
+upload_id_to_s3_keys: Dict[str, Dict] = {}
 
 
 async def setup_redis():
@@ -52,24 +58,27 @@ async def lifespan(app: FastAPI):
 
 async def handle_redis_message(message: dict):
     """Handle an incoming Redis message and notify the relevant client"""
-    if not message:
+    if not message or message['type'] != 'message':
         return
 
     data = json.loads(message['data'])
     task_id = data['task_id']
+    status = data['status']
+    result = data.get('result')  # Not used.
 
-    print("From handle_redis_message ==> Task ID: ")
-    print(task_id)
-
-    client_id = task_to_clients.get(task_id)
+    client_id = task_id_to_client_id.get(task_id)
     if client_id:
         websocket = active_connections.get(client_id)
         if websocket and websocket.client_state == WebSocketState.CONNECTED:
+            # Send notification to the client
             await websocket.send_json({
                 "task_id": task_id,
-                "status": data['status']
+                "status": status,
+                "upload_id": task_id_to_upload_id.get(task_id),  # TODO: Can it fail to find the upload_id?
             })
-        del task_to_clients[task_id]
+        # Clean up mappings
+        del task_id_to_client_id[task_id]
+        del task_id_to_upload_id[task_id]
 
 
 async def redis_listener(pubsub):
@@ -110,23 +119,62 @@ if not os.path.exists(UPLOAD_DIRECTORY):
 active_connections: Dict[str, WebSocket] = {}
 
 # Dictionary to map from task_id to client ids
-task_to_clients: Dict[str, str] = {}
+task_id_to_client_id: Dict[str, str] = {}
+task_id_to_upload_id: Dict[str, str] = {}
 
 
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    pdf_path = os.path.join(UPLOAD_DIRECTORY, file.filename)
-    txt_filename = f"{os.path.splitext(file.filename)[0]}.txt"
-    txt_path = os.path.join(UPLOAD_DIRECTORY, txt_filename)
+class DownloadUrlRequest(BaseModel):
+    upload_id: str
 
-    # Save uploaded PDF
-    async with aiofiles.open(pdf_path, 'wb') as out_file:
-        content = await file.read()  # async read
-        await out_file.write(content)  # async write
 
-    task = process_pdf_task.delay(pdf_path, txt_path)
+class DownloadUrlResponse(BaseModel):
+    download_url: str
 
-    return {"task_id": task.id}
+
+@app.post("/generate_download_url", response_model=DownloadUrlResponse)
+async def generate_download_url(request: DownloadUrlRequest):
+
+    # TODO: The downloaded files should have a readable name, not just the upload_id.
+
+    s3_keys = upload_id_to_s3_keys.get(request.upload_id)
+    if not s3_keys:
+        raise HTTPException(status_code=400, detail="Invalid upload_id")
+
+    s3_text_key = s3_keys["s3_text_key"]
+    presigned_url = s3_client.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': BUCKET_NAME, 'Key': s3_text_key},
+        ExpiresIn=3600  # Only allow the user to download for 1 hour
+    )
+
+    return DownloadUrlResponse(download_url=presigned_url)
+
+
+class UploadCompleteRequest(BaseModel):
+    upload_id: str
+    client_id: str
+
+
+@app.post("/upload_complete")
+def upload_complete(request: UploadCompleteRequest):
+    # Retrieve S3 keys using the upload_id
+    s3_keys = upload_id_to_s3_keys.get(request.upload_id)
+    if not s3_keys:
+        raise HTTPException(status_code=400, detail="Invalid upload_id")
+
+    s3_pdf_key = s3_keys["s3_pdf_key"]
+    s3_text_key = s3_keys["s3_text_key"]
+
+    # Assuming process_pdf_task is a Celery task
+    task = process_pdf_task.delay(s3_pdf_key, s3_text_key)
+
+    # Store the mappings
+    task_id_to_client_id[task.id] = request.client_id
+    task_id_to_upload_id[task.id] = request.upload_id
+
+    return {
+        "task_id": task.id
+    }
 
 
 @app.get("/result/{task_id}")
@@ -147,6 +195,30 @@ def get_result(task_id: str):
         return {"status": "Processing"}
 
 
+@app.post("/generate_presigned_url")
+def generate_presigned_url():
+    upload_id = str(uuid4())
+
+    s3_pdf_key = f"{S3_RAW_FOLDER}/{upload_id}.pdf"
+    s3_text_key = f"{S3_PROCESSED_FOLDER}/{upload_id}.txt"
+
+    presigned_url = s3_client.generate_presigned_post(
+        Bucket=BUCKET_NAME,
+        Key=s3_pdf_key,
+        ExpiresIn=1200  # I assume that no file will take longer than 20 minutes to upload
+    )
+
+    upload_id_to_s3_keys[upload_id] = {
+        "s3_pdf_key": s3_pdf_key,
+        "s3_text_key": s3_text_key
+    }
+
+    return {
+        "upload_url": presigned_url,
+        "upload_id": upload_id
+    }
+
+
 async def send_task_completed_message(websocket: WebSocket, task_id: str):
     await websocket.send_json({"task_id": task_id, "status": "completed"})
 
@@ -156,20 +228,9 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await websocket.accept()
     active_connections[client_id] = websocket
     try:
-        while True:
-            data = await websocket.receive_json()
-            task_id = data.get("task_id")
-            if task_id:
-                # Simply map the task to this client, overwriting any previous mapping
-                task_to_clients[task_id] = client_id
+        while True:  # Keep the connection alive
+            await asyncio.sleep(1)
     except WebSocketDisconnect:
         del active_connections[client_id]
-        # Remove any tasks associated with this client
-        task_ids_to_remove = [
-            task_id for task_id, cid in task_to_clients.items()
-            if cid == client_id
-        ]
-        for task_id in task_ids_to_remove:
-            del task_to_clients[task_id]
     except Exception as e:
         await websocket.close()

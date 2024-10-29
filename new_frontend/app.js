@@ -56,7 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Handle file upload
-    uploadForm.addEventListener('submit', (event) => {
+    uploadForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         if (!isConnected) {
             alert('Please connect with a username first.');
@@ -71,7 +71,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         for (let file of files) {
-            uploadFile(file);
+            await uploadFile(file);
         }
 
         // Clear file input after upload
@@ -79,41 +79,88 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-function uploadFile(file) {
-    const formData = new FormData();
-    formData.append('file', file);
+async function uploadFile(file) {
+    try {
+        // Step 1: Get presigned URL and upload_id
+        const presignedResponse = await fetch('http://localhost:8000/generate_presigned_url', {
+            method: 'POST'
+        });
+        const presignedData = await presignedResponse.json();
+        const { upload_url, upload_id } = presignedData;
 
-    fetch('http://localhost:8000/upload', {
-        method: 'POST',
-        body: formData
-    })
-    .then(response => response.json())
-    .then(data => {
-        const taskId = data.task_id;
-        tasks[taskId] = {
+        // Add task to tracking with initial status
+        tasks[upload_id] = {
             filename: file.name,
-            status: 'Processing'
+            status: 'Uploading',
+            upload_id: upload_id
         };
         updateTaskTable();
-        sendTaskIdToWebSocket(taskId);
-    })
-    .catch(error => {
-        console.error('Error:', error);
-        alert('Error uploading file: ' + file.name);
-    });
+
+        // Step 2: Upload file to S3 using presigned POST
+        const formData = new FormData();
+        Object.entries(upload_url.fields).forEach(([key, value]) => {
+            formData.append(key, value);
+        });
+        formData.append('file', file);
+
+        const uploadResponse = await fetch(upload_url.url, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!uploadResponse.ok) {
+            throw new Error('Failed to upload to S3');
+        }
+
+        // Update status to processing
+        tasks[upload_id].status = 'Processing';
+        updateTaskTable();
+
+        console.log(upload_id);
+        console.log(username);
+
+        const requestBody = JSON.stringify({
+            upload_id: upload_id,
+            client_id: username
+        });
+        console.log('Request body:', requestBody);
+
+        const completeResponse = await fetch('http://localhost:8000/upload_complete', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: requestBody
+        });
+
+        const completeData = await completeResponse.json();
+        tasks[upload_id].task_id = completeData.task_id;
+        updateTaskTable();
+
+    } catch (error) {
+        console.error('Error during upload process:', error);
+        // Update task status to error
+        if (tasks[upload_id]) {
+            tasks[upload_id].status = 'Error';
+            tasks[upload_id].error = error.message;
+            updateTaskTable();
+        }
+        alert(`Error uploading file: ${file.name}`);
+    }
 }
 
 function updateTaskTable() {
     const taskTableBody = document.querySelector('#taskTable tbody');
     taskTableBody.innerHTML = '';
-    for (let [taskId, task] of Object.entries(tasks)) {
+
+    for (let [id, task] of Object.entries(tasks)) {
         const row = document.createElement('tr');
         const statusClass = `task-status ${task.status.toLowerCase()}`;
 
-        // Task ID
-        const taskIdCell = document.createElement('td');
-        taskIdCell.textContent = taskId;
-        row.appendChild(taskIdCell);
+        // Task/Upload ID
+        const idCell = document.createElement('td');
+        idCell.textContent = task.task_id || id;
+        row.appendChild(idCell);
 
         // Filename
         const filenameCell = document.createElement('td');
@@ -129,22 +176,20 @@ function updateTaskTable() {
         // Download Cell
         const downloadCell = document.createElement('td');
         if (task.status === 'completed') {
-            const downloadLink = document.createElement('a');
-            downloadLink.href = `http://localhost:8000/result/${taskId}`;
-            downloadLink.textContent = 'Download';
-            downloadLink.className = 'btn btn-sm btn-success';
-            downloadLink.target = '_blank';
-            downloadCell.appendChild(downloadLink);
-        } else if (task.status === 'Processing') {
-            const disabledButton = document.createElement('button');
-            disabledButton.textContent = 'Download';
-            disabledButton.className = 'btn btn-sm btn-secondary disabled';
-            disabledButton.disabled = true;
-            downloadCell.appendChild(disabledButton);
-        } else if (task.status === 'error') {
+            const downloadButton = document.createElement('button');
+            downloadButton.textContent = 'Download';
+            downloadButton.className = 'btn btn-sm btn-success';
+            downloadButton.onclick = () => getDownloadUrl(task.upload_id);
+            downloadCell.appendChild(downloadButton);
+        } else if (task.status === 'Uploading' || task.status === 'Processing') {
+            const spinner = document.createElement('div');
+            spinner.className = 'spinner-border spinner-border-sm';
+            spinner.setAttribute('role', 'status');
+            downloadCell.appendChild(spinner);
+        } else if (task.status === 'Error') {
             const errorText = document.createElement('small');
             errorText.className = 'text-danger';
-            errorText.textContent = 'Processing failed';
+            errorText.textContent = task.error || 'Processing failed';
             downloadCell.appendChild(errorText);
         }
         row.appendChild(downloadCell);
@@ -152,6 +197,31 @@ function updateTaskTable() {
         taskTableBody.appendChild(row);
     }
 }
+
+async function getDownloadUrl(upload_id) {
+    try {
+        const response = await fetch('http://localhost:8000/generate_download_url', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ upload_id: upload_id })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to get download URL');
+        }
+
+        const data = await response.json();
+        // Open the download URL in a new tab
+        window.open(data.download_url, '_blank');
+    } catch (error) {
+        console.error('Error getting download URL:', error);
+        alert('Error getting download URL: ' + error.message);
+    }
+}
+
 
 function initiateWebSocket() {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -167,9 +237,11 @@ function initiateWebSocket() {
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        const taskId = data.task_id;
-        if (tasks[taskId]) {
-            tasks[taskId].status = data.status;
+        const { task_id, status, upload_id } = data;
+
+        if (tasks[upload_id]) {
+            tasks[upload_id].status = status;
+            tasks[upload_id].task_id = task_id;
             updateTaskTable();
         }
     };
@@ -183,12 +255,4 @@ function initiateWebSocket() {
         console.log('WebSocket connection closed');
         isConnected = false;
     };
-}
-
-function sendTaskIdToWebSocket(taskId) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ task_id: taskId }));
-    } else {
-        console.error('WebSocket is not open. Cannot send task ID.');
-    }
 }

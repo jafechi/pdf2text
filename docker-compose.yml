@@ -8,10 +8,7 @@ services:
       - "8000:8000"
     depends_on:
       - redis
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file: .env
 
   worker:
     build: ./backend
@@ -23,10 +20,7 @@ services:
       - ./data:/data
     depends_on:
       - redis
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file: .env
 
   redis:
     image: redis:6-alpine

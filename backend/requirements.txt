@@ -9,3 +9,4 @@ pillow
 pdf2image
 PyPDF2
 aioredis
+boto3
