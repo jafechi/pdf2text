@@ -4,7 +4,7 @@ import os
 import redis
 from .celery_app import celery_app
 from .models import TaskCompleteMessage, TASK_COMPLETE_CHANNEL
-from .pdf_processor import PDFToTextConverter
+from .pdf_to_text_converter import PDFToTextConverter
 from celery import Task
 from .config import s3_client, BUCKET_NAME
 
