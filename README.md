@@ -28,3 +28,12 @@ Follow these steps to run the application locally using the 'run-locally' branch
    - Open `frontend/index.html` in your web browser.
 
 6. **Use the application**
+
+## Cloud Architecture
+
+Below is a diagram of the cloud architecture for this application:
+
+![Cloud Architecture](cloud_architecture.png)
+
+**Note:** Currently, only the S3 service has been implemented in the actual application. The other AWS services shown in the diagram represent the ideal architecture for future development and are not yet integrated into the current version of the application.
+
