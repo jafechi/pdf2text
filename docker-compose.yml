@@ -3,7 +3,6 @@ services:
     build: ./backend
     volumes:
       - ./backend:/app
-      - ./data:/data
     ports:
       - "8000:8000"
     depends_on:
@@ -17,7 +16,6 @@ services:
         replicas: 2 # Just 2 for this presentation
     volumes:
       - ./backend:/app
-      - ./data:/data
     depends_on:
       - redis
     env_file: .env
