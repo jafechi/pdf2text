@@ -5,20 +5,24 @@ from contextlib import asynccontextmanager
 from typing import Dict
 from uuid import uuid4
 
-import aiofiles
-import boto3
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from redis.asyncio import Redis
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from celery.result import AsyncResult
 from .celery_app import celery_app
 from .tasks import process_pdf_task
 from starlette.websockets import WebSocketState
-from .config import s3_client, BUCKET_NAME, AWS_REGION, S3_RAW_FOLDER, S3_PROCESSED_FOLDER
+from .config import s3_client, BUCKET_NAME, S3_RAW_FOLDER, S3_PROCESSED_FOLDER
+from .models import TASK_COMPLETE_CHANNEL, TaskCompleteMessage, WebSocketNotificationMessage
 
 upload_id_to_s3_keys: Dict[str, Dict] = {}
+
+active_connections: Dict[str, WebSocket] = {}
+
+task_id_to_client_id: Dict[str, str] = {}
+task_id_to_upload_id: Dict[str, str] = {}
 
 
 async def setup_redis():
@@ -26,7 +30,7 @@ async def setup_redis():
     redis = Redis.from_url(os.getenv('CELERY_RESULT_BACKEND'))
     pubsub = redis.pubsub()
 
-    await pubsub.subscribe('task_complete')
+    await pubsub.subscribe(TASK_COMPLETE_CHANNEL)
     return redis, pubsub
 
 
@@ -45,14 +49,12 @@ async def cleanup_redis(app: FastAPI, redis: Redis, pubsub):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: setup Redis
     redis, pubsub = await setup_redis()
     app.redis_listener_task = asyncio.create_task(redis_listener(pubsub))
 
     try:
         yield
     finally:
-        # Shutdown: cleanup Redis
         await cleanup_redis(app, redis, pubsub)
 
 
@@ -61,24 +63,23 @@ async def handle_redis_message(message: dict):
     if not message or message['type'] != 'message':
         return
 
-    data = json.loads(message['data'])
-    task_id = data['task_id']
-    status = data['status']
-    result = data.get('result')  # Not used.
+    try:
+        data = TaskCompleteMessage.model_validate(json.loads(message['data']))
+    except ValidationError as e:
+        print(f"Invalid message format: {e}")
+        return
 
-    client_id = task_id_to_client_id.get(task_id)
+    client_id = task_id_to_client_id.get(data.task_id)
     if client_id:
         websocket = active_connections.get(client_id)
         if websocket and websocket.client_state == WebSocketState.CONNECTED:
-            # Send notification to the client
-            await websocket.send_json({
-                "task_id": task_id,
-                "status": status,
-                "upload_id": task_id_to_upload_id.get(task_id),  # TODO: Can it fail to find the upload_id?
-            })
+            upload_id = task_id_to_upload_id.get(data.task_id)
+            task_complete_notification = WebSocketNotificationMessage(task_id=data.task_id, status=data.status,
+                                                                      upload_id=upload_id)
+            await websocket.send_json(task_complete_notification.model_dump())
         # Clean up mappings
-        del task_id_to_client_id[task_id]
-        del task_id_to_upload_id[task_id]
+        del task_id_to_client_id[data.task_id]
+        del task_id_to_upload_id[data.task_id]
 
 
 async def redis_listener(pubsub):
@@ -111,17 +112,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIRECTORY = "/data"
-
-if not os.path.exists(UPLOAD_DIRECTORY):
-    os.makedirs(UPLOAD_DIRECTORY)
-
-active_connections: Dict[str, WebSocket] = {}
-
-# Dictionary to map from task_id to client ids
-task_id_to_client_id: Dict[str, str] = {}
-task_id_to_upload_id: Dict[str, str] = {}
-
 
 class DownloadUrlRequest(BaseModel):
     upload_id: str
@@ -133,7 +123,6 @@ class DownloadUrlResponse(BaseModel):
 
 @app.post("/generate_download_url", response_model=DownloadUrlResponse)
 async def generate_download_url(request: DownloadUrlRequest):
-
     # TODO: The downloaded files should have a readable name, not just the upload_id.
 
     s3_keys = upload_id_to_s3_keys.get(request.upload_id)
@@ -157,7 +146,6 @@ class UploadCompleteRequest(BaseModel):
 
 @app.post("/upload_complete")
 def upload_complete(request: UploadCompleteRequest):
-    # Retrieve S3 keys using the upload_id
     s3_keys = upload_id_to_s3_keys.get(request.upload_id)
     if not s3_keys:
         raise HTTPException(status_code=400, detail="Invalid upload_id")
@@ -165,10 +153,8 @@ def upload_complete(request: UploadCompleteRequest):
     s3_pdf_key = s3_keys["s3_pdf_key"]
     s3_text_key = s3_keys["s3_text_key"]
 
-    # Assuming process_pdf_task is a Celery task
     task = process_pdf_task.delay(s3_pdf_key, s3_text_key)
 
-    # Store the mappings
     task_id_to_client_id[task.id] = request.client_id
     task_id_to_upload_id[task.id] = request.upload_id
 
@@ -179,15 +165,15 @@ def upload_complete(request: UploadCompleteRequest):
 
 @app.get("/result/{task_id}")
 def get_result(task_id: str):
-    result = AsyncResult(task_id, app=celery_app)
+    if task_id not in task_id_to_client_id:
+        return {"status": "Invalid task_id"}
 
-    # TODO: Detect when the task_id is invalid
+    result = AsyncResult(task_id, app=celery_app)
 
     if result.ready():
         txt_path = result.get()
 
         if not txt_path:
-            # TODO: Analyze what to do here. Retry? Just return an error?
             return {"status": "Error"}
 
         return FileResponse(txt_path, media_type='text/plain', filename=os.path.basename(txt_path))
@@ -220,7 +206,8 @@ def generate_presigned_url():
 
 
 async def send_task_completed_message(websocket: WebSocket, task_id: str):
-    await websocket.send_json({"task_id": task_id, "status": "completed"})
+    completed_notification = WebSocketNotificationMessage(task_id=task_id, status="completed")
+    await websocket.send_json(completed_notification.model_dump_json())
 
 
 @app.websocket("/ws/{client_id}")

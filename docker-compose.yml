@@ -12,7 +12,7 @@ services:
 
   worker:
     build: ./backend
-    command: celery -A app.tasks worker --loglevel=info # --max-tasks-per-child=10
+    command: celery -A app.tasks worker --loglevel=info --uid=nobody --gid=nogroup # --max-tasks-per-child=10
     deploy:
         replicas: 2 # Just 2 for this presentation
     volumes:

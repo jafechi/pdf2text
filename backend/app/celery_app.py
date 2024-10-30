@@ -11,9 +11,8 @@ celery_app = Celery(
     task_cls='celery.Task',
 )
 
-# Configure Celery to ensure signals work
 celery_app.conf.update(
-    task_track_started=True,  # Enable task tracking
+    task_track_started=True,
     task_serializer='json',
     result_serializer='json',
     accept_content=['json']
