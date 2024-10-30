@@ -21,6 +21,7 @@ upload_id_to_s3_keys: Dict[str, Dict] = {}
 
 active_connections: Dict[str, WebSocket] = {}
 
+
 task_id_to_client_id: Dict[str, str] = {}
 task_id_to_upload_id: Dict[str, str] = {}
 
@@ -161,24 +162,6 @@ def upload_complete(request: UploadCompleteRequest):
     return {
         "task_id": task.id
     }
-
-
-@app.get("/result/{task_id}")
-def get_result(task_id: str):
-    if task_id not in task_id_to_client_id:
-        return {"status": "Invalid task_id"}
-
-    result = AsyncResult(task_id, app=celery_app)
-
-    if result.ready():
-        txt_path = result.get()
-
-        if not txt_path:
-            return {"status": "Error"}
-
-        return FileResponse(txt_path, media_type='text/plain', filename=os.path.basename(txt_path))
-    else:
-        return {"status": "Processing"}
 
 
 @app.post("/generate_presigned_url")
