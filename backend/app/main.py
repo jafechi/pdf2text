@@ -5,12 +5,12 @@ from contextlib import asynccontextmanager
 from typing import Dict
 from uuid import uuid4
 
+from celery.result import AsyncResult
 from pydantic import BaseModel, ValidationError
 from redis.asyncio import Redis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from celery.result import AsyncResult
+
 from .celery_app import celery_app
 from .tasks import process_pdf_task
 from starlette.websockets import WebSocketState
@@ -75,8 +75,12 @@ async def handle_redis_message(message: dict):
         websocket = active_connections.get(client_id)
         if websocket and websocket.client_state == WebSocketState.CONNECTED:
             upload_id = task_id_to_upload_id.get(data.task_id)
+
+            result = AsyncResult(data.task_id, app=celery_app)
+            s3_text_key = result.get() if result.successful() else None
+
             task_complete_notification = WebSocketNotificationMessage(task_id=data.task_id, status=data.status,
-                                                                      upload_id=upload_id)
+                                                                      upload_id=upload_id, result=s3_text_key)
             await websocket.send_json(task_complete_notification.model_dump())
         # Clean up mappings
         del task_id_to_client_id[data.task_id]

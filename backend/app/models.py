@@ -8,11 +8,11 @@ TASK_COMPLETE_CHANNEL = 'task_complete'
 class TaskCompleteMessage(BaseModel):
     task_id: str
     status: str
-    result: Optional[str] = None
     error: Optional[str] = None
 
 
 class WebSocketNotificationMessage(BaseModel):
     task_id: str
     status: str
-    upload_id: Optional[str]
+    upload_id: Optional[str] = None
+    result: Optional[str] = None

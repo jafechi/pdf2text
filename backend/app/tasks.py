@@ -19,7 +19,6 @@ class ProcessPDFTask(Task):
         message = TaskCompleteMessage(
             task_id=task_id,
             status='completed',
-            result=retval
         )
         redis_client.publish(TASK_COMPLETE_CHANNEL, message.model_dump_json())
         super().on_success(retval, task_id, args, kwargs)
